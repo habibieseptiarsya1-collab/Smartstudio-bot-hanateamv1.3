@@ -15,7 +15,7 @@ import urllib.parse
 st.set_page_config(page_title="SmartStudio Ultimate", layout="wide", page_icon="🎹")
 
 # KONFIGURASI NOMOR ADMIN UNTUK LINK WA
-ADMIN_WA = "628123456789" 
+ADMIN_WA = "6281227178342" 
 
 st.markdown("""
 <style>
