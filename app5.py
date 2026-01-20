@@ -15,7 +15,6 @@ import urllib.parse
 st.set_page_config(page_title="SmartStudio Ultimate", layout="wide", page_icon="🎹")
 
 # --- [PENTING] GANTI NOMOR ADMIN DISINI ---
-# Gunakan format 628xxx (tanpa + atau 0 di depan)
 ADMIN_WA = "628123456789" 
 # ------------------------------------------
 
@@ -26,12 +25,14 @@ st.markdown("""
     .stChatMessage { background-color: #1e293b; border: 1px solid #334155; border-radius: 12px; }
     div[data-testid="stMetric"] { background-color: #1e293b; padding: 20px; border-radius: 10px; border-left: 4px solid #3b82f6; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1); }
     h1, h2, h3 { color: #f8fafc !important; }
-    .stButton button { background-color: #3b82f6; color: white; border-radius: 8px; font-weight: 600; }
-    [data-testid="stDataFrame"] { border-radius: 8px; overflow: hidden; }
+    .stButton button { border-radius: 8px; font-weight: 600; }
+    div[data-testid="stExpander"] { background-color: #1e293b; border-radius: 10px; }
+    .approve-btn { background-color: #22c55e !important; color: white !important; }
+    .reject-btn { background-color: #ef4444 !important; color: white !important; }
 </style>
 """, unsafe_allow_html=True)
 
-DB_FILE = 'smartstudio_v18.db'
+DB_FILE = 'smartstudio_v20.db'
 
 # ==========================================
 # 1. DATABASE SYSTEM
@@ -40,24 +41,31 @@ def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     
+    # Tabel User Admin
     c.execute('''CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password_hash TEXT)''')
     
+    # Tabel Booking Studio
     c.execute('''CREATE TABLE IF NOT EXISTS bookings (
         id INTEGER PRIMARY KEY AUTOINCREMENT, customer_name TEXT, no_hp TEXT, date TEXT, 
         start_hour INTEGER, duration INTEGER, instruments TEXT, price REAL, status TEXT)''')
     
+    # Tabel Inventory
     c.execute('''CREATE TABLE IF NOT EXISTS inventory (id INTEGER PRIMARY KEY AUTOINCREMENT, item_name TEXT UNIQUE)''')
     
+    # Tabel Courses (Ada kolom status: Pending/Active/Rejected)
     c.execute('''CREATE TABLE IF NOT EXISTS courses (
         id INTEGER PRIMARY KEY AUTOINCREMENT, student_name TEXT, instrument TEXT, 
         schedule_day TEXT, schedule_time TEXT, duration INTEGER, status TEXT)''')
     
+    # Tabel Logs
     c.execute('''CREATE TABLE IF NOT EXISTS audit_logs (
         id INTEGER PRIMARY KEY AUTOINCREMENT, action TEXT, details TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
 
+    # Buat Akun Admin Default (Password: Hanateam123)
     try: c.execute("INSERT INTO users VALUES (?, ?)", ('admin', hashlib.sha256("Hanateam123".encode()).hexdigest()))
     except: pass
 
+    # Isi Inventory Default
     c.execute("SELECT count(*) FROM inventory")
     if c.fetchone()[0] == 0:
         items = [('gitar elektrik',), ('bass',), ('drum set',), ('keyboard',), ('mic wireless',)]
@@ -75,7 +83,7 @@ def log_action(conn, action, details):
     conn.commit()
 
 # ==========================================
-# 2. LOGIC SYSTEM
+# 2. LOGIC SYSTEM (Conflict & Price)
 # ==========================================
 def calculate_price(start, duration):
     base = 50000
@@ -87,30 +95,38 @@ def calculate_price(start, duration):
 
 def check_conflict(conn, date_str, start, duration, exclude_id=None, exclude_type='booking'):
     """
-    Mengecek bentrok jadwal baik di tabel Bookings maupun Courses.
+    Mengecek bentrok jadwal.
+    - Booking vs Booking: Cek tabrakan jam.
+    - Booking vs Course: Cek tabrakan. Course status 'Pending' & 'Active' dianggap MEMBLOKIR. 
+      Course 'Rejected' tidak memblokir.
     """
     c = conn.cursor()
     
     # 1. Cek Tabel Bookings
-    if exclude_type == 'booking' and exclude_id:
-        c.execute("SELECT start_hour, duration FROM bookings WHERE date = ? AND id != ?", (date_str, exclude_id))
-    else:
-        c.execute("SELECT start_hour, duration FROM bookings WHERE date = ?", (date_str,))
+    query_bk = "SELECT start_hour, duration FROM bookings WHERE date = ?"
+    params_bk = [date_str]
     
+    if exclude_type == 'booking' and exclude_id:
+        query_bk += " AND id != ?"
+        params_bk.append(exclude_id)
+        
+    c.execute(query_bk, tuple(params_bk))
     for b_start, b_dur in c.fetchall():
         if (start < b_start + b_dur) and (start + duration > b_start): return True
 
-    # 2. Cek Tabel Courses (Asumsi schedule_day menyimpan tanggal spesifik atau hari)
-    # Untuk simplifikasi di bot ini, kita anggap course menyimpan Tanggal Spesifik juga untuk sesi pertemuannya
+    # 2. Cek Tabel Courses (Abaikan yang status Rejected)
+    query_course = "SELECT schedule_time, duration FROM courses WHERE schedule_day = ? AND status != 'Rejected'"
+    params_course = [date_str]
+    
     if exclude_type == 'course' and exclude_id:
-        c.execute("SELECT schedule_time, duration FROM courses WHERE schedule_day = ? AND id != ?", (date_str, exclude_id))
-    else:
-        c.execute("SELECT schedule_time, duration FROM courses WHERE schedule_day = ?", (date_str,))
+        query_course += " AND id != ?"
+        params_course.append(exclude_id)
+        
+    c.execute(query_course, tuple(params_course))
     
     for c_start_str, c_dur in c.fetchall():
-        # Parsing jam course (misal "16:00:00" atau "16")
         try:
-            c_start = int(c_start_str.split(':')[0])
+            c_start = int(c_start_str.split(':')[0]) # Asumsi format jam "16" atau "16:00"
             if (start < c_start + c_dur) and (start + duration > c_start): return True
         except: pass
         
@@ -125,10 +141,10 @@ def get_customer_stats(conn, no_hp):
     except: return 0
 
 def get_level_info(total_jam):
-    if total_jam >= 50: return "🎸 Rockstar", "Diskon 15%", 1.0, "gold"
-    elif total_jam >= 20: return "🎹 Pro Musician", "Diskon 10%", 0.7, "orange"
-    elif total_jam >= 5: return "🥁 Garage Band", "Diskon 5%", 0.4, "blue"
-    else: return "🎤 Newcomer", "Main 5 jam lagi dpt diskon!", 0.1, "gray"
+    if total_jam >= 50: return "🎸 Rockstar", "Diskon 15%", 1.0
+    elif total_jam >= 20: return "🎹 Pro Musician", "Diskon 10%", 0.7
+    elif total_jam >= 5: return "🥁 Garage Band", "Diskon 5%", 0.4
+    else: return "🎤 Newcomer", "Main 5 jam lagi dpt diskon!", 0.1
 
 def parse_intent(user_input, inventory_list):
     txt = user_input.lower()
@@ -144,7 +160,7 @@ def parse_intent(user_input, inventory_list):
     wib = datetime.timezone(datetime.timedelta(hours=7))
     today = datetime.datetime.now(wib).date()
 
-    # Parse Date
+    # Parsing Tanggal
     if 'hari ini' in txt: res['date'] = today.strftime("%Y-%m-%d")
     elif 'besok' in txt: res['date'] = (today + timedelta(days=1)).strftime("%Y-%m-%d")
     elif 'lusa' in txt: res['date'] = (today + timedelta(days=2)).strftime("%Y-%m-%d")
@@ -153,18 +169,18 @@ def parse_intent(user_input, inventory_list):
         if date_match:
             try: 
                 target_day = int(date_match.group(2))
-                # Logic sederhana ganti hari di bulan ini
+                # Logic sederhana: jika tgl < hari ini, berarti bulan depan, otherwise bulan ini (simplified)
                 res['date'] = today.replace(day=target_day).strftime("%Y-%m-%d")
                 clean_txt = clean_txt.replace(date_match.group(0), "")
             except: pass
 
-    # Parse Duration
+    # Parsing Durasi
     d_match = re.search(r'(\d+)\s*(jam|hour)', clean_txt)
     if d_match: 
         res['dur'] = int(d_match.group(1))
         clean_txt = clean_txt.replace(d_match.group(0), "")
 
-    # Parse Time
+    # Parsing Jam
     time_match = re.search(r'(jam|pukul)?\s*(\d{1,2})[:.]?(\d{2})?\s*(pagi|siang|sore|malam)?', clean_txt)
     if time_match:
         h = int(time_match.group(2))
@@ -174,184 +190,117 @@ def parse_intent(user_input, inventory_list):
             elif modifier == 'siang' and h < 11: h += 12
         if 8 <= h <= 23: res['time'] = h
 
-    # Parse Items
+    # Parsing Alat
     for item in inventory_list:
         if item in txt or (item.split()[0] in txt): res['found_items'].append(item)
             
     return res
 
+# ==========================================
+# 3. TRANSACTION FUNCTIONS
+# ==========================================
 def finalize_booking(conn, bs):
-    # Cek Validasi Conflict (Booking & Course)
+    # Cek Conflict
     conflict = check_conflict(conn, bs['date'], bs['time'], bs['dur'])
-    
     if conflict:
-        msg = f"❌ Maaf Kak {bs['name']}, jam {bs['time']}:00 di tanggal {bs['date']} sudah penuh (ada Booking/Kursus)."
-        return msg, False
-    else:
-        price, is_peak = calculate_price(bs['time'], bs['dur'])
-        items_str = ", ".join(set(bs['items'])).title() if bs['items'] else "Standard Room"
-        
-        conn.execute('''INSERT INTO bookings (customer_name, no_hp, date, start_hour, duration, instruments, price, status) 
-                        VALUES (?,?,?,?,?,?,?,?)''', 
-                        (bs['name'], bs['phone'], bs['date'], bs['time'], bs['dur'], items_str, price, "Confirmed"))
-        
-        log_action(conn, "NEW_BOOKING", f"{bs['name']} ({bs['phone']}) - {bs['date']}")
-        conn.commit()
-        
-        # --- LINK WA KE ADMIN ---
-        wa_text = (
-            f"*KONFIRMASI BOOKING STUDIO*\n"
-            f"--------------------------------\n"
-            f"Nama: {bs['name']}\n"
-            f"No HP: {bs['phone']}\n"
-            f"Tanggal: {bs['date']}\n"
-            f"Jam: {bs['time']}:00 WIB\n"
-            f"Durasi: {bs['dur']} Jam\n"
-            f"Alat: {items_str}\n"
-            f"Estimasi Total: Rp {price:,.0f}\n"
-            f"--------------------------------\n"
-            f"Mohon diproses min!"
-        )
-        wa_encoded = urllib.parse.quote(wa_text)
-        wa_link = f"https://wa.me/{ADMIN_WA}?text={wa_encoded}"
-
-        ticket_html = f"""
-<div style="font-family: monospace; background-color: #fffcf5; padding: 20px; border: 2px solid #333; border-radius: 10px; box-shadow: 6px 6px 0px rgba(0,0,0,0.2);">
-<div style="text-align: center; border-bottom: 2px dashed #333; padding-bottom: 10px; margin-bottom: 10px;">
-<b>🎹 SMART STUDIO RECEIPT</b>
-</div>
-<div>👤: {bs['name']}</div>
-<div>📅: {bs['date']} | ⏰ {bs['time']}:00</div>
-<div>⏳: {bs['dur']} Jam | 🎸: {items_str}</div>
-<div style="text-align: right; font-weight: bold; margin-top: 10px;">Rp {price:,.0f}</div>
-<div style="margin-top: 15px; text-align: center;">
-    <a href="{wa_link}" target="_blank" style="display: block; width: 100%; background-color: #25D366; color: white; text-decoration: none; padding: 10px 0; border-radius: 5px; font-weight: bold;">
-        📩 Kirim ke Admin (WA)
-    </a>
-</div>
-</div>
-"""
-        return ticket_html, True
-
-def finalize_course_registration(conn, bs):
-    # Cek Validasi Conflict (Booking & Course)
-    # Default durasi kursus 1 jam
-    conflict = check_conflict(conn, bs['course_date'], bs['course_time'], 1)
-
-    if conflict:
-        return f"❌ Maaf Kak {bs['name']}, jadwal {bs['course_date']} jam {bs['course_time']}:00 sudah terisi. Mohon pilih waktu lain.", False
+        return f"❌ Maaf Kak {bs['name']}, jam {bs['time']}:00 di tanggal {bs['date']} sudah penuh (ada Booking/Kursus).", False
     
-    # Simpan
-    conn.execute("INSERT INTO courses (student_name, instrument, schedule_day, schedule_time, duration, status) VALUES (?,?,?,?,?,?)", 
-                 (bs['name'], bs['course_instrument'], bs['course_date'], str(bs['course_time']), 1, "Pending"))
-    log_action(conn, "NEW_COURSE", f"{bs['name']} - {bs['course_instrument']}")
+    # Hitung Harga & Insert
+    price, _ = calculate_price(bs['time'], bs['dur'])
+    items_str = ", ".join(set(bs['items'])).title() if bs['items'] else "Standard Room"
+    
+    conn.execute('''INSERT INTO bookings (customer_name, no_hp, date, start_hour, duration, instruments, price, status) 
+                    VALUES (?,?,?,?,?,?,?,?)''', 
+                    (bs['name'], bs['phone'], bs['date'], bs['time'], bs['dur'], items_str, price, "Confirmed"))
+    log_action(conn, "NEW_BOOKING", f"{bs['name']} ({bs['phone']}) - {bs['date']}")
     conn.commit()
-
-    # Link WA ke Admin
-    wa_text = (
-        f"*PENDAFTARAN KURSUS BARU*\n"
-        f"--------------------------------\n"
-        f"Nama Siswa: {bs['name']}\n"
-        f"Instrumen: {bs['course_instrument']}\n"
-        f"Mulai Tanggal: {bs['course_date']}\n"
-        f"Jam: {bs['course_time']}:00\n"
-        f"--------------------------------\n"
-        f"Mohon info biaya pendaftaran min."
-    )
-    wa_encoded = urllib.parse.quote(wa_text)
-    wa_link = f"https://wa.me/{ADMIN_WA}?text={wa_encoded}"
+    
+    # Generate Link WA Admin
+    wa_text = f"BOOKING STUDIO\nNama: {bs['name']}\nTgl: {bs['date']}\nJam: {bs['time']}:00\nDurasi: {bs['dur']} Jam\nTotal: Rp {price:,.0f}"
+    wa_link = f"https://wa.me/{ADMIN_WA}?text={urllib.parse.quote(wa_text)}"
 
     ticket_html = f"""
-<div style="font-family: monospace; background-color: #f0fdf4; padding: 20px; border: 2px solid #166534; border-radius: 10px; box-shadow: 6px 6px 0px rgba(0,0,0,0.1);">
-<div style="text-align: center; border-bottom: 2px dashed #166534; padding-bottom: 10px; margin-bottom: 10px;">
-<b>🎓 FORMULIR KURSUS</b>
-</div>
-<div>👤: {bs['name']}</div>
-<div>🎸: Kelas {bs['course_instrument']}</div>
-<div>📅: {bs['course_date']}</div>
-<div>⏰: {bs['course_time']}:00 WIB</div>
-<div style="margin-top: 15px; text-align: center;">
-    <a href="{wa_link}" target="_blank" style="display: block; width: 100%; background-color: #166534; color: white; text-decoration: none; padding: 10px 0; border-radius: 5px; font-weight: bold;">
-        📩 Kirim ke Admin (WA)
-    </a>
-</div>
-</div>
-"""
+    <div style='background:#fffcf5; padding:15px; border-radius:10px; border:2px solid #333; color:#000;'>
+    <b>🎹 TIKET BOOKING</b><br>
+    👤 {bs['name']} ({bs['phone']})<br>
+    📅 {bs['date']} | ⏰ {bs['time']}:00<br>
+    ⏳ {bs['dur']} Jam | 💰 Rp {price:,.0f}<br>
+    <a href="{wa_link}" target="_blank" style="background:#25D366; color:white; padding:8px; border-radius:5px; text-decoration:none; display:block; text-align:center; margin-top:10px; font-weight:bold;">
+    📩 Kirim ke Admin (WA)</a>
+    </div>"""
+    return ticket_html, True
+
+def finalize_course_registration(conn, bs):
+    # Cek Conflict (Pending tetap blokir slot)
+    conflict = check_conflict(conn, bs['course_date'], bs['course_time'], 1)
+    if conflict:
+        return f"❌ Maaf, jadwal {bs['course_date']} jam {bs['course_time']}:00 sudah terisi.", False
+    
+    # Insert dengan Status PENDING
+    conn.execute("INSERT INTO courses (student_name, instrument, schedule_day, schedule_time, duration, status) VALUES (?,?,?,?,?,?)", 
+                 (bs['name'], bs['course_instrument'], bs['course_date'], str(bs['course_time']), 1, "Pending"))
+    log_action(conn, "NEW_COURSE_REQ", f"{bs['name']} - {bs['course_instrument']}")
+    conn.commit()
+
+    # Generate Link WA Admin
+    wa_text = f"DAFTAR KURSUS\nNama: {bs['name']}\nInstrumen: {bs['course_instrument']}\nTgl Mulai: {bs['course_date']}\nJam: {bs['course_time']}:00\nMohon Approval."
+    wa_link = f"https://wa.me/{ADMIN_WA}?text={urllib.parse.quote(wa_text)}"
+
+    ticket_html = f"""
+    <div style='background:#f0fdf4; padding:15px; border-radius:10px; border:2px solid #166534; color:#000;'>
+    <b>🎓 PENDAFTARAN DITERIMA</b><br>
+    👤 {bs['name']}<br>
+    🎸 Kelas: {bs['course_instrument']}<br>
+    📅 {bs['course_date']} | ⏰ {bs['course_time']}:00<br>
+    <hr style='border-top: 1px dashed #166534;'>
+    <i>Status: ⏳ <b>PENDING</b> (Menunggu Admin)</i><br>
+    <a href="{wa_link}" target="_blank" style="background:#166534; color:white; padding:8px; border-radius:5px; text-decoration:none; display:block; text-align:center; margin-top:10px; font-weight:bold;">
+    📩 Konfirmasi ke Admin (WA)</a>
+    </div>"""
     return ticket_html, True
 
 def process_reschedule(conn, type_res, target_id, new_date, new_time):
     c = conn.cursor()
-    
+    # Identifikasi tabel dan ambil durasi
     if type_res == 'booking':
         c.execute("SELECT customer_name, duration FROM bookings WHERE id=?", (target_id,))
-        row = c.fetchone()
-        if not row: return "❌ Booking tidak ditemukan.", False
-        name, duration = row
-        table = "bookings"
         exclude_type = 'booking'
     else:
         c.execute("SELECT student_name, duration FROM courses WHERE id=?", (target_id,))
-        row = c.fetchone()
-        if not row: return "❌ Data Kursus tidak ditemukan.", False
-        name, duration = row
-        table = "courses"
         exclude_type = 'course'
+    
+    row = c.fetchone()
+    if not row: return "❌ Data tidak ditemukan.", False
+    name, duration = row
 
-    # Cek Bentrok
+    # Cek Conflict dengan jadwal baru (exclude ID sendiri)
     if check_conflict(conn, new_date, new_time, duration, exclude_id=target_id, exclude_type=exclude_type):
         return f"❌ Gagal. Jam {new_time}:00 di tanggal {new_date} sudah penuh.", False
     
-    # Update
+    # Update DB
     if type_res == 'booking':
         new_price, _ = calculate_price(new_time, duration)
         conn.execute("UPDATE bookings SET date=?, start_hour=?, price=? WHERE id=?", (new_date, new_time, new_price, target_id))
     else:
-        # Update course schedule (schedule_day disini kita pakai format YYYY-MM-DD agar seragam)
         conn.execute("UPDATE courses SET schedule_day=?, schedule_time=? WHERE id=?", (new_date, str(new_time), target_id))
 
     log_action(conn, f"RESCHEDULE_{type_res.upper()}", f"ID {target_id} moved to {new_date}")
     conn.commit()
-    
-    return f"✅ **Reschedule {type_res.title()} Berhasil!**\nJadwal baru Kak **{name}**: {new_date} jam {new_time}:00.", True
+    return f"✅ **Reschedule Berhasil!**\nJadwal baru Kak **{name}**: {new_date} jam {new_time}:00.", True
 
 # ==========================================
-# 3. UI LAYER
+# 4. MAIN APPLICATION (UI)
 # ==========================================
 def main():
     conn = init_db()
     
-    # --- Sidebar ---
     st.sidebar.title("🎹 SmartStudio Bot")
     st.sidebar.caption("By Hanateam")
-    st.sidebar.markdown("---")
-    st.sidebar.header("🏆 Member Area")
-    cek_hp = st.sidebar.text_input("Cek Level (No HP):", placeholder="0812xxx")
     
-    if cek_hp:
-        jam_terbang = get_customer_stats(conn, cek_hp)
-        level_name, benefit, progress, lvl_color = get_level_info(jam_terbang)
-        st.sidebar.info(f"**Level: {level_name}**")
-        st.sidebar.metric("Jam Terbang", f"{jam_terbang} Jam")
-        st.sidebar.progress(progress)
-        st.sidebar.success(f"🎁 {benefit}")
-    
-    st.sidebar.markdown("---")
-    
+    # --- Sidebar: Admin Login ---
     if "admin_logged_in" not in st.session_state: st.session_state.admin_logged_in = False
-    if "chat_history" not in st.session_state: st.session_state.chat_history = []
     
-    # Init Bot State
-    if "bot_state" not in st.session_state: 
-        st.session_state.bot_state = {
-            "mode": "idle", "step": 0, 
-            "name": None, "phone": None, 
-            "date": None, "time": None, "dur": None, 
-            "items": [], "target_id": None, "res_type": None,
-            "course_instrument": None, "course_date": None, "course_time": None
-        }
-
-    # Admin Login
-    with st.sidebar.expander("🔐 Admin Login", expanded=False):
+    with st.sidebar.expander("🔐 Admin Area", expanded=not st.session_state.admin_logged_in):
         if not st.session_state.admin_logged_in:
             pwd = st.text_input("Password", type="password")
             if st.button("Masuk"):
@@ -361,283 +310,206 @@ def main():
         else:
             if st.button("Keluar"): st.session_state.admin_logged_in = False; st.rerun()
 
+    # --- Sidebar: Cek Member ---
+    st.sidebar.markdown("---")
+    st.sidebar.header("🏆 Cek Member")
+    cek_hp = st.sidebar.text_input("No HP:", placeholder="0812xxx")
+    if cek_hp:
+        jam = get_customer_stats(conn, cek_hp)
+        lvl, ben, prog, _ = get_level_info(jam)
+        st.sidebar.info(f"Level: {lvl}\nTotal Main: {jam} Jam")
+        st.sidebar.progress(prog)
+        st.sidebar.success(ben)
+
     # ==========================================
     # VIEW A: ADMIN DASHBOARD
     # ==========================================
     if st.session_state.admin_logged_in:
         st.title("🎛️ Studio Command Center")
         
-        with st.expander("💾 Database Tools", expanded=True):
-            if st.button("💣 Hapus Database (Reset Total)"):
-                conn.close()
-                if os.path.exists(DB_FILE): os.remove(DB_FILE)
-                st.success("Reset Berhasil. Reloading..."); time.sleep(2); st.rerun()
-
-        df_bk = pd.read_sql("SELECT * FROM bookings", conn)
-        df_crs = pd.read_sql("SELECT * FROM courses", conn)
+        t1, t2, t3, t4 = st.tabs(["📅 Bookings", "🛠️ Inventory", "🎓 Courses (Approval)", "🛡️ Logs"])
         
-        c1, c2 = st.columns(2)
-        c1.metric("Total Bookings", f"{len(df_bk)}")
-        c2.metric("Total Siswa", f"{len(df_crs)}")
-        
-        t1, t2, t3, t4 = st.tabs(["📅 Bookings", "🛠️ Inventory", "🎓 Courses", "🛡️ Logs"])
-        
+        # --- TAB 1: BOOKINGS ---
         with t1:
+            df_bk = pd.read_sql("SELECT * FROM bookings ORDER BY id DESC", conn)
             st.dataframe(df_bk, use_container_width=True, hide_index=True)
             if not df_bk.empty:
-                del_ops = df_bk.apply(lambda x: f"{x['id']} - {x['customer_name']}", axis=1)
-                sel_del = st.selectbox("Hapus Booking", del_ops)
-                if st.button("❌ Hapus"):
-                    conn.execute("DELETE FROM bookings WHERE id=?", (int(sel_del.split(' - ')[0]),))
+                del_id = st.number_input("Hapus ID Booking", min_value=0, step=1)
+                if st.button("Hapus Booking"):
+                    conn.execute("DELETE FROM bookings WHERE id=?", (del_id,))
                     conn.commit(); st.rerun()
 
+        # --- TAB 2: INVENTORY ---
         with t2:
             st.dataframe(pd.read_sql("SELECT * FROM inventory", conn), use_container_width=True)
-            new_item = st.text_input("Tambah Alat")
+            new_item = st.text_input("Tambah Alat Baru")
             if st.button("Simpan Alat"):
                 try:
                     conn.execute("INSERT INTO inventory (item_name) VALUES (?)", (new_item.lower(),))
                     conn.commit(); st.rerun()
                 except: pass
 
+        # --- TAB 3: COURSES (APPROVAL SYSTEM) ---
         with t3:
-            st.info("ℹ️ Pendaftaran Siswa baru dilakukan melalui Chatbot agar tervalidasi jadwalnya.")
-            st.dataframe(df_crs, use_container_width=True)
-            if not df_crs.empty:
-                sel_c_del = st.selectbox("Hapus Siswa", df_crs.apply(lambda x: f"{x['id']} - {x['student_name']}", axis=1))
-                if st.button("❌ Hapus Siswa"):
-                    conn.execute("DELETE FROM courses WHERE id=?", (int(sel_c_del.split(' - ')[0]),))
-                    conn.commit(); st.rerun()
+            st.info("ℹ️ Input manual siswa dihapus. Semua pendaftaran via Chatbot dan masuk ke antrian 'Pending' di sini.")
+            
+            c_col1, c_col2 = st.columns(2)
+            
+            with c_col1:
+                st.markdown("### ⏳ Menunggu Approval")
+                df_pending = pd.read_sql("SELECT * FROM courses WHERE status='Pending'", conn)
+                
+                if df_pending.empty:
+                    st.success("Tidak ada antrian pending.")
+                else:
+                    for idx, row in df_pending.iterrows():
+                        with st.container(border=True):
+                            st.markdown(f"**{row['student_name']}** - {row['instrument']}")
+                            st.text(f"Jadwal: {row['schedule_day']} | {row['schedule_time']}:00")
+                            
+                            b1, b2 = st.columns(2)
+                            if b1.button("✅ Terima", key=f"acc_{row['id']}"):
+                                conn.execute("UPDATE courses SET status='Active' WHERE id=?", (row['id'],))
+                                log_action(conn, "COURSE_APPROVED", f"Approved {row['student_name']}")
+                                conn.commit(); st.rerun()
+                            
+                            if b2.button("❌ Tolak", key=f"rej_{row['id']}"):
+                                conn.execute("UPDATE courses SET status='Rejected' WHERE id=?", (row['id'],))
+                                log_action(conn, "COURSE_REJECTED", f"Rejected {row['student_name']}")
+                                conn.commit(); st.rerun()
 
-        with t4: st.dataframe(pd.read_sql("SELECT * FROM audit_logs ORDER BY id DESC", conn), use_container_width=True)
+            with c_col2:
+                st.markdown("### ✅ Siswa Aktif")
+                df_active = pd.read_sql("SELECT id, student_name, instrument, schedule_day, schedule_time FROM courses WHERE status='Active'", conn)
+                st.dataframe(df_active, hide_index=True, use_container_width=True)
+                
+                with st.expander("Lihat Data Rejected / Histori"):
+                    df_rej = pd.read_sql("SELECT * FROM courses WHERE status='Rejected'", conn)
+                    st.dataframe(df_rej, hide_index=True)
+
+        # --- TAB 4: LOGS ---
+        with t4:
+            if st.button("Clear Logs"):
+                conn.execute("DELETE FROM audit_logs"); conn.commit(); st.rerun()
+            st.dataframe(pd.read_sql("SELECT * FROM audit_logs ORDER BY id DESC", conn), use_container_width=True)
 
     # ==========================================
-    # VIEW B: CHATBOT (USER)
+    # VIEW B: CHATBOT INTERFACE
     # ==========================================
     else:
+        if "chat_history" not in st.session_state: 
+            st.session_state.chat_history = [("assistant", "Halo! 👋 Ketik **'Booking'** untuk sewa atau **'Daftar Kursus'** untuk les.")]
+        
+        if "bot_state" not in st.session_state: 
+            st.session_state.bot_state = {
+                "mode": "idle", "step": 0, "name": None, "phone": None, 
+                "date": None, "time": None, "dur": None, "items": [], 
+                "target_id": None, "res_type": None,
+                "course_instrument": None, "course_date": None, "course_time": None
+            }
+
         st.title("🤖 Assistant Studio")
         st.caption(f"Nomor Admin: {ADMIN_WA}")
 
-        # Heatmap Ketersediaan
-        with st.expander("📊 Cek Jadwal Kosong", expanded=False):
-            tgl_pilih = st.date_input("Cek Tanggal:", datetime.date.today())
-            bookings_today = conn.execute("SELECT start_hour, duration FROM bookings WHERE date = ?", (str(tgl_pilih),)).fetchall()
-            courses_today = conn.execute("SELECT schedule_time, duration FROM courses WHERE schedule_day = ?", (str(tgl_pilih),)).fetchall()
-            
-            hours_map = {h: 0 for h in range(8, 24)}
-            
-            # Hitung load Booking
-            for start, dur in bookings_today:
-                for h in range(start, start + dur):
-                    if h in hours_map: hours_map[h] += 1
-            
-            # Hitung load Kursus
-            for t_str, dur in courses_today:
-                try:
-                    start = int(str(t_str).split(':')[0])
-                    for h in range(start, start + dur):
-                        if h in hours_map: hours_map[h] += 1
-                except: pass
-            
-            df_heat = pd.DataFrame({"Jam": [f"{h}:00" for h in hours_map], "Status": ["Penuh" if v > 0 else "Kosong" for v in hours_map.values()], "Value": list(hours_map.values())})
-            st.bar_chart(df_heat.set_index("Jam")['Value'], color="#F63366")
-            
-            penuh = [k for k, v in hours_map.items() if v > 0]
-            if penuh: st.warning(f"Jam Sibuk: {', '.join([str(x)+':00' for x in penuh])}")
-            else: st.success("Jadwal Kosong!")
-
-        # Chat Interface
-        if not st.session_state.chat_history:
-            st.session_state.chat_history.append(("assistant", "Halo! 👋 Ketik **'Booking'** untuk sewa studio atau **'Daftar Kursus'** untuk les."))
-
-        inv_rows = conn.execute("SELECT item_name FROM inventory").fetchall()
-        inv_list = [x[0] for x in inv_rows]
-        
+        # --- Chat UI ---
         for role, txt in st.session_state.chat_history:
             with st.chat_message(role): 
                 if "<div" in txt: st.markdown(txt, unsafe_allow_html=True)
                 else: st.markdown(txt)
-            
+
+        # --- Logic Engine ---
         if prompt := st.chat_input("Ketik pesan..."):
             st.session_state.chat_history.append(("user", prompt))
             with st.chat_message("user"): st.markdown(prompt)
 
-            res = parse_intent(prompt, inv_list)
             bs = st.session_state.bot_state
-            
-            # ----------------------------------------
+            inv_rows = conn.execute("SELECT item_name FROM inventory").fetchall()
+            res = parse_intent(prompt, [x[0] for x in inv_rows])
+
             # GLOBAL COMMANDS
-            # ----------------------------------------
             if res['intent'] == 'cancel':
-                reply = "⚠️ **Dibatalkan.**"
-                st.session_state.bot_state = {k:None for k in bs} # Reset All
-                bs = st.session_state.bot_state; bs['mode'] = 'idle'; bs['step'] = 0; bs['items'] = []
+                reply = "⚠️ Transaksi Dibatalkan."
+                st.session_state.bot_state = {k:None for k in bs}; bs['mode']='idle'
             
             elif res['intent'] == 'reset':
-                reply = "🔄 Reset. Silakan mulai lagi."
-                st.session_state.bot_state = {k:None for k in bs} # Reset All
-                bs = st.session_state.bot_state; bs['mode'] = 'idle'; bs['step'] = 0; bs['items'] = []
-            
-            # ----------------------------------------
-            # INTENT: BOOKING
-            # ----------------------------------------
+                reply = "🔄 Reset Bot."
+                st.session_state.bot_state = {k:None for k in bs}; bs['mode']='idle'
+
+            # BOOKING FLOW
             elif res['intent'] == 'booking' or bs['mode'] == 'booking':
                 bs['mode'] = 'booking'
-                
-                # Parsing Contextual
                 if res['date']: bs['date'] = res['date']
+                if res['time']: bs['time'] = res['time']
                 if res['dur']: bs['dur'] = res['dur']
-                if bs['step'] != 'ASK_PHONE' and res['time']: bs['time'] = res['time']
                 if res['found_items']: bs['items'].extend(res['found_items'])
 
-                # Flow
                 if not bs['date']:
-                    bs['step'] = 'ASK_DATE'
-                    reply = "Siap Booking Studio. **Untuk tanggal berapa?** (Contoh: Besok, atau Tgl 25)"
-                
+                    bs['step'] = 'ASK_DATE'; reply = "📅 Siap Booking. Tanggal berapa? (Misal: Besok)"
                 elif not bs['time']:
-                    bs['step'] = 'ASK_TIME'
-                    reply = f"Oke tanggal {bs['date']}. **Jam berapa mulainya?**"
-                
-                elif bs['dur'] is None:
-                    # Cek Availability Awal sebelum tanya durasi
-                    if check_conflict(conn, bs['date'], bs['time'], 1):
-                        reply = f"⛔ Jam {bs['time']}:00 penuh. Pilih jam lain ya."
-                        bs['time'] = None
-                    else:
-                        bs['step'] = 'ASK_DURATION'
-                        reply = "Jam tersedia. **Mau sewa berapa jam?**"
-
-                elif not bs['items'] and bs['step'] == 'ASK_DURATION':
-                    # Cek Availability Full dengan durasi
-                    if check_conflict(conn, bs['date'], bs['time'], bs['dur']):
-                        reply = f"⛔ Maaf, slot waktu tidak cukup untuk {bs['dur']} jam. Coba durasi lebih pendek atau jam lain."
-                        bs['dur'] = None
-                    else:
-                        bs['step'] = 'ASK_GEAR'
-                        reply = "Oke. **Ada tambahan alat khusus?** (Ketik 'Standar' jika tidak)."
-                
+                    bs['step'] = 'ASK_TIME'; reply = f"⏰ Oke tanggal {bs['date']}. Jam berapa mulainya?"
+                elif not bs['dur']:
+                    bs['step'] = 'ASK_DUR'; reply = "⏳ Mau sewa berapa jam?"
                 elif not bs['name']:
-                    if bs['step'] == 'ASK_GEAR' and ("standar" in prompt.lower() or "tidak" in prompt.lower()): pass
-                    bs['step'] = 'ASK_NAME'
-                    reply = "Siap. **Atas nama siapa?**"
-                
+                    bs['step'] = 'ASK_NAME'; reply = "👤 Atas nama siapa?"
                 elif not bs['phone']:
-                    bs['name'] = prompt.title()
-                    bs['step'] = 'ASK_PHONE'
-                    reply = "Terakhir, **Nomor WA kakak?** (Untuk konfirmasi admin)."
-                
-                elif bs['step'] == 'ASK_PHONE':
-                    if len(prompt) > 8:
-                        bs['phone'] = prompt
-                        msg, status = finalize_booking(conn, bs)
-                        reply = msg
-                        # Reset
-                        st.session_state.bot_state = {k:None for k in bs}; bs=st.session_state.bot_state; bs['mode']='idle'; bs['items'] = []
-                    else:
-                        reply = "Nomor tidak valid. Masukkan angka saja."
+                    bs['name'] = prompt.title(); bs['step'] = 'ASK_PHONE'; reply = "📱 Nomor WA? (Untuk konfirmasi)"
                 else:
-                    reply = "Lanjut..."
+                    bs['phone'] = prompt
+                    msg, _ = finalize_booking(conn, bs)
+                    reply = msg
+                    st.session_state.bot_state = {k:None for k in bs}; bs['mode']='idle'
 
-            # ----------------------------------------
-            # INTENT: KURSUS (UPDATED)
-            # ----------------------------------------
+            # COURSE FLOW (UPDATED for Approval)
             elif res['intent'] == 'course_register' or bs['mode'] == 'course_register':
                 bs['mode'] = 'course_register'
-                
                 if bs['step'] == 0:
-                    bs['step'] = 'C_NAME'
-                    reply = "🎓 **Pendaftaran Kursus Musik**\nSiapa nama calon siswanya?"
-                
+                    bs['step'] = 'C_NAME'; reply = "🎓 **Pendaftaran Kursus**\nSiapa nama calon siswanya?"
                 elif bs['step'] == 'C_NAME':
-                    bs['name'] = prompt.title()
-                    bs['step'] = 'C_INSTRUMENT'
-                    reply = f"Halo {bs['name']}. **Mau belajar alat apa?** (Gitar/Piano/Drum/Vokal)"
-                
-                elif bs['step'] == 'C_INSTRUMENT':
-                    bs['course_instrument'] = prompt.title()
-                    bs['step'] = 'C_DATE'
-                    reply = "Oke. **Mau mulai tanggal berapa?** (Sebutkan Tanggal, misal: Tgl 25)"
-                
+                    bs['name'] = prompt.title(); bs['step'] = 'C_INS'; reply = "🎸 Halo! Mau ambil kelas alat apa?"
+                elif bs['step'] == 'C_INS':
+                    bs['course_instrument'] = prompt.title(); bs['step'] = 'C_DATE'; reply = "📅 Mau mulai tanggal berapa?"
                 elif bs['step'] == 'C_DATE':
-                    # Parsing Tanggal Manual jika regex global gagal menangkap konteks spesifik ini
-                    detected_date = res['date']
-                    if detected_date:
-                        bs['course_date'] = detected_date
-                        bs['step'] = 'C_TIME'
-                        reply = f"Siap tanggal {bs['course_date']}. **Jam berapa bisanya?** (Contoh: 16.00)"
-                    else:
-                        reply = "Mohon sebutkan tanggal yang jelas (contoh: 'Besok' atau 'Tgl 25')."
-
+                    if res['date']:
+                        bs['course_date'] = res['date']; bs['step'] = 'C_TIME'; reply = f"⏰ Tanggal {bs['course_date']}. Jam berapa bisanya?"
+                    else: reply = "Mohon sebutkan tanggal (Contoh: Besok / Tgl 25)."
                 elif bs['step'] == 'C_TIME':
-                    # Parsing Jam Manual
-                    tm = re.search(r'(\d{1,2})', prompt)
-                    if tm:
-                        val_time = int(tm.group(1))
-                        if 8 <= val_time <= 22:
-                            bs['course_time'] = val_time
-                            msg, status = finalize_course_registration(conn, bs)
-                            if status:
-                                reply = msg
-                                # Reset
-                                st.session_state.bot_state = {k:None for k in bs}; bs=st.session_state.bot_state; bs['mode']='idle'; bs['items'] = []
-                            else:
-                                reply = msg + "\n\nSilakan pilih **Jam** lain:"
-                        else: reply = "Studio buka jam 08:00 - 23:00."
-                    else: reply = "Jam berapa? (Masukkan angka, misal '15')"
+                    if res['time']:
+                        bs['course_time'] = res['time']
+                        msg, stat = finalize_course_registration(conn, bs)
+                        reply = msg
+                        st.session_state.bot_state = {k:None for k in bs}; bs['mode']='idle'
+                    else: reply = "Jam berapa? (Masukkan angka, misal 16)"
 
-            # ----------------------------------------
-            # INTENT: RESCHEDULE (UPDATED)
-            # ----------------------------------------
+            # RESCHEDULE FLOW
             elif res['intent'] == 'reschedule' or bs['mode'] == 'reschedule':
                 bs['mode'] = 'reschedule'
-                
                 if bs['step'] == 0:
-                    bs['step'] = 'RES_TYPE'
-                    reply = "🔄 **Reschedule Jadwal**\nMau ganti jadwal **Booking** Studio atau **Kursus**?"
-                
+                    bs['step'] = 'RES_TYPE'; reply = "🔄 **Reschedule Jadwal**\nMau ganti jadwal **Booking** atau **Kursus**?"
                 elif bs['step'] == 'RES_TYPE':
-                    if 'kursus' in prompt.lower(): bs['res_type'] = 'course'
-                    else: bs['res_type'] = 'booking'
-                    
-                    bs['step'] = 'RES_NAME'
-                    reply = f"Oke Reschedule {bs['res_type'].title()}. **Atas nama siapa data lamanya?**"
-                
+                    bs['res_type'] = 'course' if 'kursus' in prompt.lower() else 'booking'
+                    bs['step'] = 'RES_NAME'; reply = f"👤 Oke, ganti jadwal {bs['res_type']}. Atas nama siapa?"
                 elif bs['step'] == 'RES_NAME':
                     table = "bookings" if bs['res_type'] == 'booking' else "courses"
-                    col_name = "customer_name" if bs['res_type'] == 'booking' else "student_name"
-                    col_date = "date" if bs['res_type'] == 'booking' else "schedule_day"
-                    col_time = "start_hour" if bs['res_type'] == 'booking' else "schedule_time"
-
-                    rows = conn.execute(f"SELECT id, {col_date}, {col_time} FROM {table} WHERE {col_name} LIKE ? ORDER BY id DESC", (f"%{prompt}%",)).fetchall()
-                    
-                    if rows:
-                        row = rows[0]
-                        bs['target_id'] = row[0]
-                        bs['step'] = 'RES_NEW_DATE'
-                        reply = f"Ketemu! Jadwal lama: {row[1]} jam {row[2]}. **Pindah ke Tanggal berapa?**"
-                    else:
-                        reply = "Data tidak ditemukan. Coba nama lain?"
-
+                    col = "customer_name" if bs['res_type'] == 'booking' else "student_name"
+                    row = conn.execute(f"SELECT id FROM {table} WHERE {col} LIKE ? ORDER BY id DESC", (f"%{prompt}%",)).fetchone()
+                    if row:
+                        bs['target_id'] = row[0]; bs['step'] = 'RES_NEW_DATE'; reply = "📅 Data ditemukan. Mau pindah ke tanggal berapa?"
+                    else: reply = "❌ Nama tidak ditemukan. Coba lagi?"
                 elif bs['step'] == 'RES_NEW_DATE':
                     if res['date']:
-                        bs['date'] = res['date'] # Simpan sementara di var booking biar hemat memori
-                        bs['step'] = 'RES_NEW_TIME'
-                        reply = f"Oke ke tanggal {bs['date']}. **Jam berapa?**"
+                        bs['date'] = res['date']; bs['step'] = 'RES_NEW_TIME'; reply = "⏰ Jam berapa?"
                     else: reply = "Tanggal berapa? (Contoh: Besok)"
-
                 elif bs['step'] == 'RES_NEW_TIME':
                     if res['time']:
-                        msg, status = process_reschedule(conn, bs['res_type'], bs['target_id'], bs['date'], res['time'])
+                        msg, _ = process_reschedule(conn, bs['res_type'], bs['target_id'], bs['date'], res['time'])
                         reply = msg
-                        st.session_state.bot_state = {k:None for k in bs}; bs=st.session_state.bot_state; bs['mode']='idle'; bs['items'] = []
-                    else:
-                        reply = "Jam berapa? (Contoh: 15)"
-
+                        st.session_state.bot_state = {k:None for k in bs}; bs['mode']='idle'
+                    else: reply = "Jam berapa? (Angka 0-23)"
+            
             else:
-                reply = "Saya tidak mengerti. Ketik **Booking**, **Daftar Kursus**, atau **Reschedule**."
+                reply = "Maaf saya belum mengerti. Ketik **Booking** untuk sewa, **Kursus** untuk daftar les, atau **Reschedule**."
 
-            # Output Reply
+            # Output Response
             time.sleep(0.5)
             st.session_state.chat_history.append(("assistant", reply))
             with st.chat_message("assistant"): 
