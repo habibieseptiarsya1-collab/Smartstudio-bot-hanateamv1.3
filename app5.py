@@ -15,7 +15,7 @@ import urllib.parse
 st.set_page_config(page_title="SmartStudio Ultimate", layout="wide", page_icon="🎹")
 
 # KONFIGURASI NOMOR ADMIN UNTUK LINK WA
-ADMIN_WA = "6281227178342" 
+ADMIN_WA = "628123456789" 
 
 st.markdown("""
 <style>
@@ -454,7 +454,7 @@ def main():
                         except: st.error("Item sudah ada!")
 
         with t3:
-            # === BAGIAN INI DIMODIFIKASI: INPUT MANUAL DIHAPUS, APPROVAL SYSTEM DITAMBAHKAN ===
+            # === APPROVAL SYSTEM ===
             st.info("ℹ️ Input manual siswa telah dinonaktifkan. Silakan gunakan Chatbot untuk pendaftaran, lalu Approve di sini.")
             
             col_pending, col_active = st.columns(2)
@@ -555,6 +555,9 @@ def main():
             res = parse_intent(prompt, inv_list)
             bs = st.session_state.bot_state
             
+            # --- FIX: INITIALIZE REPLY TO AVOID CRASH ---
+            reply = "Maaf, saya tidak mengerti maksud Anda. Coba ketik 'Booking' atau 'Kursus'."
+
             # --- GLOBAL CANCEL / RESET ---
             if res['intent'] == 'cancel':
                 reply = "⚠️ **Pembatalan?** Hubungi Admin WA jika darurat."
