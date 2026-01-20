@@ -14,9 +14,8 @@ import urllib.parse
 # ==========================================
 st.set_page_config(page_title="SmartStudio Ultimate", layout="wide", page_icon="🎹")
 
-# --- [PENTING] GANTI NOMOR ADMIN DISINI ---
-ADMIN_WA = "628123456789" 
-# ------------------------------------------
+# --- KONFIGURASI NOMOR ADMIN ---
+ADMIN_WA = "628123456789"  # Ganti dengan nomor WA Admin
 
 st.markdown("""
 <style>
@@ -27,12 +26,13 @@ st.markdown("""
     h1, h2, h3 { color: #f8fafc !important; }
     .stButton button { border-radius: 8px; font-weight: 600; }
     div[data-testid="stExpander"] { background-color: #1e293b; border-radius: 10px; }
+    /* Tombol Approval */
     .approve-btn { background-color: #22c55e !important; color: white !important; }
     .reject-btn { background-color: #ef4444 !important; color: white !important; }
 </style>
 """, unsafe_allow_html=True)
 
-DB_FILE = 'smartstudio_v20.db'
+DB_FILE = 'smartstudio_ultimate_v2.db'
 
 # ==========================================
 # 1. DATABASE SYSTEM
@@ -41,10 +41,10 @@ def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     
-    # Tabel User Admin
+    # Tabel Users (Admin)
     c.execute('''CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password_hash TEXT)''')
     
-    # Tabel Booking Studio
+    # Tabel Booking
     c.execute('''CREATE TABLE IF NOT EXISTS bookings (
         id INTEGER PRIMARY KEY AUTOINCREMENT, customer_name TEXT, no_hp TEXT, date TEXT, 
         start_hour INTEGER, duration INTEGER, instruments TEXT, price REAL, status TEXT)''')
@@ -52,7 +52,7 @@ def init_db():
     # Tabel Inventory
     c.execute('''CREATE TABLE IF NOT EXISTS inventory (id INTEGER PRIMARY KEY AUTOINCREMENT, item_name TEXT UNIQUE)''')
     
-    # Tabel Courses (Ada kolom status: Pending/Active/Rejected)
+    # Tabel Courses (Update: status Pending/Active/Rejected)
     c.execute('''CREATE TABLE IF NOT EXISTS courses (
         id INTEGER PRIMARY KEY AUTOINCREMENT, student_name TEXT, instrument TEXT, 
         schedule_day TEXT, schedule_time TEXT, duration INTEGER, status TEXT)''')
@@ -61,11 +61,11 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS audit_logs (
         id INTEGER PRIMARY KEY AUTOINCREMENT, action TEXT, details TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
 
-    # Buat Akun Admin Default (Password: Hanateam123)
+    # Seed Admin
     try: c.execute("INSERT INTO users VALUES (?, ?)", ('admin', hashlib.sha256("Hanateam123".encode()).hexdigest()))
     except: pass
 
-    # Isi Inventory Default
+    # Seed Inventory
     c.execute("SELECT count(*) FROM inventory")
     if c.fetchone()[0] == 0:
         items = [('gitar elektrik',), ('bass',), ('drum set',), ('keyboard',), ('mic wireless',)]
@@ -83,7 +83,7 @@ def log_action(conn, action, details):
     conn.commit()
 
 # ==========================================
-# 2. LOGIC SYSTEM (Conflict & Price)
+# 2. LOGIC SYSTEM (CONFLICT & PRICE)
 # ==========================================
 def calculate_price(start, duration):
     base = 50000
@@ -95,17 +95,15 @@ def calculate_price(start, duration):
 
 def check_conflict(conn, date_str, start, duration, exclude_id=None, exclude_type='booking'):
     """
-    Mengecek bentrok jadwal.
-    - Booking vs Booking: Cek tabrakan jam.
-    - Booking vs Course: Cek tabrakan. Course status 'Pending' & 'Active' dianggap MEMBLOKIR. 
-      Course 'Rejected' tidak memblokir.
+    Cek bentrok:
+    1. Booking vs Booking
+    2. Booking vs Course (Pending/Active)
     """
     c = conn.cursor()
     
     # 1. Cek Tabel Bookings
     query_bk = "SELECT start_hour, duration FROM bookings WHERE date = ?"
     params_bk = [date_str]
-    
     if exclude_type == 'booking' and exclude_id:
         query_bk += " AND id != ?"
         params_bk.append(exclude_id)
@@ -114,19 +112,20 @@ def check_conflict(conn, date_str, start, duration, exclude_id=None, exclude_typ
     for b_start, b_dur in c.fetchall():
         if (start < b_start + b_dur) and (start + duration > b_start): return True
 
-    # 2. Cek Tabel Courses (Abaikan yang status Rejected)
+    # 2. Cek Tabel Courses (Abaikan Rejected)
+    # Asumsi: Course 'schedule_day' menyimpan tanggal spesifik (format YYYY-MM-DD)
+    # Jika course bersifat mingguan, logika perlu disesuaikan. Di sini kita pakai tanggal spesifik untuk simplifikasi bot.
     query_course = "SELECT schedule_time, duration FROM courses WHERE schedule_day = ? AND status != 'Rejected'"
     params_course = [date_str]
-    
     if exclude_type == 'course' and exclude_id:
         query_course += " AND id != ?"
         params_course.append(exclude_id)
         
     c.execute(query_course, tuple(params_course))
-    
     for c_start_str, c_dur in c.fetchall():
         try:
-            c_start = int(c_start_str.split(':')[0]) # Asumsi format jam "16" atau "16:00"
+            # Handle jika format jam "16:00" atau "16"
+            c_start = int(str(c_start_str).split(':')[0]) 
             if (start < c_start + c_dur) and (start + duration > c_start): return True
         except: pass
         
@@ -153,6 +152,7 @@ def parse_intent(user_input, inventory_list):
     if 'batal' in txt or 'cancel' in txt: res['intent'] = 'cancel'
     elif 'ulang' in txt or 'reset' in txt: res['intent'] = 'reset'
     elif 'reschedule' in txt or 'ganti' in txt: res['intent'] = 'reschedule'
+    # Intent Kursus Baru
     elif any(x in txt for x in ['kursus', 'les', 'sekolah', 'privat']): res['intent'] = 'course_register'
     elif any(x in txt for x in ['booking', 'sewa', 'pesan']): res['intent'] = 'booking'
     
@@ -169,7 +169,6 @@ def parse_intent(user_input, inventory_list):
         if date_match:
             try: 
                 target_day = int(date_match.group(2))
-                # Logic sederhana: jika tgl < hari ini, berarti bulan depan, otherwise bulan ini (simplified)
                 res['date'] = today.replace(day=target_day).strftime("%Y-%m-%d")
                 clean_txt = clean_txt.replace(date_match.group(0), "")
             except: pass
@@ -215,18 +214,35 @@ def finalize_booking(conn, bs):
     log_action(conn, "NEW_BOOKING", f"{bs['name']} ({bs['phone']}) - {bs['date']}")
     conn.commit()
     
-    # Generate Link WA Admin
+    # Generate Link WA
     wa_text = f"BOOKING STUDIO\nNama: {bs['name']}\nTgl: {bs['date']}\nJam: {bs['time']}:00\nDurasi: {bs['dur']} Jam\nTotal: Rp {price:,.0f}"
-    wa_link = f"https://wa.me/{ADMIN_WA}?text={urllib.parse.quote(wa_text)}"
+    wa_encoded = urllib.parse.quote(wa_text)
+    wa_link = f"https://wa.me/{ADMIN_WA}?text={wa_encoded}"
 
+    # HTML Ticket (Style sesuai request)
     ticket_html = f"""
-    <div style='background:#fffcf5; padding:15px; border-radius:10px; border:2px solid #333; color:#000;'>
-    <b>🎹 TIKET BOOKING</b><br>
-    👤 {bs['name']} ({bs['phone']})<br>
-    📅 {bs['date']} | ⏰ {bs['time']}:00<br>
-    ⏳ {bs['dur']} Jam | 💰 Rp {price:,.0f}<br>
-    <a href="{wa_link}" target="_blank" style="background:#25D366; color:white; padding:8px; border-radius:5px; text-decoration:none; display:block; text-align:center; margin-top:10px; font-weight:bold;">
-    📩 Kirim ke Admin (WA)</a>
+    <div style="font-family: 'Courier New', Courier, monospace; background-color: #fffcf5; color: #333; padding: 25px; max-width: 400px; margin: 10px auto; border: 2px solid #333; border-radius: 10px; box-shadow: 8px 8px 0px rgba(0,0,0,0.2);">
+    <div style="text-align: center; border-bottom: 2px dashed #333; padding-bottom: 15px; margin-bottom: 15px;">
+    <p style="margin: 0; font-weight: 900; letter-spacing: 2px;">🎹 SMART STUDIO</h2>
+    <p style="margin: 5px 0 0; font-size: 12px;">DIGITAL TICKET</p>
+    </div>
+    <div style="font-size: 14px; line-height: 1.6;">
+    <div style="display: flex; justify-content: space-between;"><span>👤 Nama:</span><strong>{bs['name']}</strong></div>
+    <div style="display: flex; justify-content: space-between;"><span>📅 Tgl:</span><strong>{bs['date']}</strong></div>
+    <div style="display: flex; justify-content: space-between;"><span>⏰ Jam:</span><strong>{bs['time']}:00 WIB</strong></div>
+    <div style="display: flex; justify-content: space-between;"><span>⏳ Durasi:</span><strong>{bs['dur']} Jam</strong></div>
+    <hr style="border: none; border-top: 1px dashed #bbb; margin: 10px 0;">
+    <div style="margin-bottom: 5px;"><span>🎸 Alat:</span><br><strong>{items_str}</strong></div>
+    </div>
+    <div style="margin-top: 20px; border-top: 2px solid #333; padding-top: 10px; text-align: right;">
+    <p style="margin: 0; font-size: 12px;">Total Paid</p>
+    <p style="margin: 0; font-size: 28px;">Rp {price:,.0f}</h1>
+    </div>
+    <div style="margin-top: 15px; text-align: center;">
+        <a href="{wa_link}" target="_blank" style="display: block; width: 100%; background-color: #25D366; color: white; text-decoration: none; padding: 10px 0; border-radius: 5px; font-weight: bold;">
+            📩 Kirim ke Admin (WA)
+        </a>
+    </div>
     </div>"""
     return ticket_html, True
 
@@ -247,8 +263,8 @@ def finalize_course_registration(conn, bs):
     wa_link = f"https://wa.me/{ADMIN_WA}?text={urllib.parse.quote(wa_text)}"
 
     ticket_html = f"""
-    <div style='background:#f0fdf4; padding:15px; border-radius:10px; border:2px solid #166534; color:#000;'>
-    <b>🎓 PENDAFTARAN DITERIMA</b><br>
+    <div style='background:#f0fdf4; padding:15px; border-radius:10px; border:2px solid #166534; color:#000; font-family: monospace;'>
+    <b>🎓 PENDAFTARAN DITERIMA</b><br><br>
     👤 {bs['name']}<br>
     🎸 Kelas: {bs['course_instrument']}<br>
     📅 {bs['course_date']} | ⏰ {bs['course_time']}:00<br>
@@ -409,8 +425,7 @@ def main():
             }
 
         st.title("🤖 Assistant Studio")
-        st.caption(f"Nomor Admin: {ADMIN_WA}")
-
+        
         # --- Chat UI ---
         for role, txt in st.session_state.chat_history:
             with st.chat_message(role): 
@@ -439,7 +454,8 @@ def main():
             elif res['intent'] == 'booking' or bs['mode'] == 'booking':
                 bs['mode'] = 'booking'
                 if res['date']: bs['date'] = res['date']
-                if res['time']: bs['time'] = res['time']
+                if bs['step'] != 'ASK_PHONE': # Jangan update jam jika sedang input HP
+                    if res['time']: bs['time'] = res['time']
                 if res['dur']: bs['dur'] = res['dur']
                 if res['found_items']: bs['items'].extend(res['found_items'])
 
