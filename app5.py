@@ -404,13 +404,15 @@ def main():
                 st.success("Database dihapus. Restarting..."); time.sleep(3); st.rerun()
 
         df_bk = pd.read_sql("SELECT * FROM bookings", conn)
-        df_crs = pd.read_sql("SELECT * FROM courses", conn)
+        
+        # --- [PERBAIKAN] HANYA HITUNG SISWA YANG STATUSNYA 'ACTIVE' ---
+        df_crs = pd.read_sql("SELECT * FROM courses WHERE status='Active'", conn)
         
         # --- STATISTIK KEMBALI ---
         c1, c2, c3 = st.columns(3)
         c1.metric("Revenue", f"Rp {df_bk['price'].sum() if not df_bk.empty else 0:,.0f}")
         c2.metric("Bookings", f"{len(df_bk)}")
-        c3.metric("Students", f"{len(df_crs)}")
+        c3.metric("Students (Active)", f"{len(df_crs)}") # Sekarang hanya menghitung yang Active
         
         if not df_bk.empty:
             st.markdown("### 📊 Statistik")
