@@ -457,7 +457,6 @@ def main():
 
         with t3:
             # === APPROVAL SYSTEM ===
-            st.info("ℹ️ Input manual siswa telah dinonaktifkan. Silakan gunakan Chatbot untuk pendaftaran, lalu Approve di sini.")
             
             col_pending, col_active = st.columns(2)
             
