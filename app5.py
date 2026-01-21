@@ -569,37 +569,47 @@ def main():
                 reply = "🔄 Oke, diulang. Silakan ketik perintah lagi."
                 st.session_state.bot_state = {k:None for k in bs}; bs['mode']='idle'; bs['items']=[]
             
-            # --- FLOW 1: BOOKING STUDIO ---
+           # --- BOOKING FLOW (YANG SUDAH DIPERBAIKI) ---
             elif res['intent'] == 'booking' or bs['mode'] == 'booking':
                 bs['mode'] = 'booking'
                 
-                # Update State Paramaters
+                # Update State Parameters
                 if res['date']: bs['date'] = res['date']
-                if bs['step'] != 'ASK_PHONE': # Jangan update jam jika sedang input HP
-                    if res['time']: bs['time'] = res['time']
+                if bs['step'] != 'ASK_PHONE' and res['time']: bs['time'] = res['time']
                 if res['dur']: bs['dur'] = res['dur']
                 if res['found_items']: bs['items'].extend(res['found_items'])
 
-                # Step-by-Step Logic
+                # Logika Step-by-Step
                 if not bs['date']:
-                    bs['step'] = 'ASK_DATE'; reply = f"📅 Siap Booking. Tanggal berapa? (Misal: Besok / Tgl 25)"
+                    bs['step'] = 'ASK_DATE'; reply = "📅 Tanggal berapa? (Misal: Besok / Tgl 25)"
+                
                 elif not bs['time']:
                     bs['step'] = 'ASK_TIME'; reply = f"⏰ Oke tanggal {bs['date']}. Jam berapa mulainya?"
+                
                 elif not bs['dur']:
                     bs['step'] = 'ASK_DUR'; reply = "⏳ Mau sewa berapa jam?"
-                elif not bs['items'] and bs['step'] == 'ASK_DUR': # Optional items check
+                
+                elif not bs['items'] and bs['step'] == 'ASK_DUR': 
                      bs['step'] = 'ASK_ITEMS'; reply = "🎸 Butuh tambahan alat? (Ketik nama alat atau 'Standar')"
+                
+                # [BAGIAN INI YANG DIPERBAIKI]
                 elif not bs['name']:
-                    bs['step'] = 'ASK_NAME'; reply = "👤 Atas nama siapa?"
+                    # Cek apakah bot baru saja bertanya nama (step == ASK_NAME)
+                    if bs['step'] == 'ASK_NAME':
+                        bs['name'] = prompt.title() # Simpan input user sebagai Nama
+                        bs['step'] = 'ASK_PHONE'
+                        reply = "📱 Nomor WA? (Untuk tiket & level)"
+                    else:
+                        # Jika belum, baru tanya sekarang
+                        bs['step'] = 'ASK_NAME'
+                        reply = "👤 Atas nama siapa?"
+
                 elif not bs['phone']:
-                    bs['name'] = prompt.title() # Capture name from previous input
-                    bs['step'] = 'ASK_PHONE'; reply = "📱 Nomor WA? (Untuk tiket & level)"
-                else:
-                    bs['phone'] = prompt # Capture phone
+                    # Karena step sebelumnya sudah ASK_PHONE, input sekarang pasti No HP
+                    bs['phone'] = prompt
                     msg, _ = finalize_booking(conn, bs)
                     reply = msg
                     st.session_state.bot_state = {k:None for k in bs}; bs['mode']='idle'; bs['items']=[]
-
             # --- FLOW 2: DAFTAR KURSUS (PENGGANTI INPUT MANUAL ADMIN) ---
             elif res['intent'] == 'course_register' or bs['mode'] == 'course_register':
                 bs['mode'] = 'course_register'
